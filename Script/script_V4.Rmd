@@ -1,0 +1,471 @@
+---
+title: "Statistical evidence in environmental and biological sciences: A comparison of P value and Bayes factor hypothesis testing"
+author: "Yefeng Yang, Maximilian Maier, Malgorzata Lagisz, Shinichi Nakagawa"
+date: "02-10-2025"
+output:
+  rmdformats::downcute:
+    code_folding: show
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    downcute_theme: "chaos"
+pkgdown:
+  as_is: true
+---
+
+# Set-up
+
+Load necessary packages and custom functions. To fully reproduce the results presented in the main text, you will need to install all `R` packages listed below. Package information is present at the end of this website.
+
+```{r, warning=FALSE}
+suppressMessages({
+  library(dplyr)
+  library(readr)
+  library(tidyr) 
+  library(tidyverse)
+  library(stringr)
+  library(ggplot2)
+  library(metafor)
+  library(here)
+  library(ggExtra)
+  library(boot)
+  library(DescTools)
+  library(BayesFactor)
+  library(XICOR)
+  library(irr)
+  library(wesanderson)
+  library(viridis)
+  library(paletteer)
+  library(ggsci)
+  library(cowplot)
+  library(patchwork)
+  library(aplot)
+  })
+
+source(here("Func","func.R"))
+```
+
+
+# Load data
+
+Thanks to the journals' mandatory open data policies and the widespread adoption of FAIR (Findable, Accessible, Interoperable, Reusable) data sharing principles, there is a wealth of publicly available, well-organised data that can be reused for secondary analysis.
+
+Our dataset comprise 23,164 experiments from two independent groups related to environmental science, ecology and evolutionary biology. We collated the dataset from publicly accessible meta-analytical datasets:
+
+> Yang, Y. et al. Publication bias impacts on effect size, statistical power, and magnitude (Type M) and sign (Type S) errors in ecology and evolutionary biology. BMC Biology 21, 1-20 (2023).
+
+> Senior, A. M. et al. Heterogeneity in ecological and evolutionary meta‐analyses: its magnitude and implications. Ecology 97, 3293-3299 (2016).
+
+> Hillebrand, H. et al. Thresholds for ecological responses to global change do not emerge from empirical data. Nature Ecology & Evolution 4, 1502-1509 (2020).
+
+Load the dataset and have some basic data wrangling:
+
+```{r}
+# load
+## Yang_BMCBio_2023
+dat_Yang_BMCBio_2023 <- readRDS(here("Dat","dat_Yang_BMCBio_2023_SMD.rds")) 
+## Yang_GCB_2022
+dat_Yang_GCB_2022 <- readRDS(here("Dat","dat_Yang_GCB_2022_SMD.rds"))
+## Senior_Ecology_2016
+dat_Senior_Ecology_2016 <- readRDS(here("Dat","dat_Senior_Ecology_2016_SMD.rds"))
+
+# combine all dat
+## a function to rename
+rename_and_select <- function(df, var_names) {
+  df %>%
+    rename(m1 = !!var_names[1],  
+           m2 = !!var_names[2],  
+           sd1 = !!var_names[3], 
+           sd2 = !!var_names[4], 
+           n1 = !!var_names[5], 
+           n2 = !!var_names[6]) 
+}
+
+## reate a new list to store the combined data
+dat_list <- list()
+
+## dat_Yang_BMCBio_2023
+for(i in seq_along(dat_Yang_BMCBio_2023)) {
+  dat_list[[paste0("BMCBio_", i)]] <- rename_and_select(
+    dat_Yang_BMCBio_2023[[i]], 
+    c("T_mean", "C_mean", "T_sd", "C_sd", "T_n", "C_n")
+  )
+}
+
+## dat_Yang_GCB_2022
+for(i in seq_along(dat_Yang_GCB_2022)) {
+  dat_list[[paste0("GCB_", i)]] <- rename_and_select(
+    dat_Yang_GCB_2022[[i]], 
+    c("T_mean", "C_mean", "T_sd", "C_sd", "T_N", "C_N")
+  )
+}
+
+## dat_Senior_Ecology_2016
+for(i in seq_along(dat_Senior_Ecology_2016)) {
+  dat_list[[paste0("Ecology_", i)]] <- rename_and_select(
+    dat_Senior_Ecology_2016[[i]], 
+    c("mean_trt", "mean_ctrl", "SD_trt", "SD_ctrl", "N_trt", "N_ctrl")
+  )
+}
+
+## only select relevant variables
+dat_list <- lapply(dat_list, function(df) {
+  df[, c("m1", "m2", "sd1", "sd2", "n1", "n2")]
+})
+
+# tidy data
+dat <- do.call(rbind.data.frame, dat_list)
+dat <- as.data.frame(dat)
+knitr::kable(dfround(dat,3) %>% head(10), "pipe")
+```
+
+# Estimation
+
+We estimate statistical evidence based on classical (P values) and Bayesian (Bayes factors) hypothesis testing methods. 
+
+```{r}
+# run the following code to get all metrics, which will take a long while; alternative, use the saved objects.
+# create an empty result list
+#res <- vector("list", nrow(dat))
+# initialize the progress bar
+#pb <- txtProgressBar(min = 1, max = nrow(dat), style = 3)
+# computation
+#for (i in 1:nrow(dat)) {
+#  if (any(is.na(dat$m1[i]), is.na(dat$m2[i]), is.na(dat$sd1[i]), is.na(dat$sd2[i]), is.na(dat$n1[i]), is.na(dat$n2[i])) | 
+#      dat$n1[i] < 2 | dat$n2[i] < 2 | dat$sd1[i] <= 0 | dat$sd2[i] <= 0) {
+#    res[[i]] <- NA 
+#  } else {
+#    res[[i]] <- tryCatch({
+#      calc_evi(m1 = dat$m1[i], m2 = dat$m2[i], sd1 = dat$sd1[i], sd2 = dat$sd2[i], n1 = dat$n1[i], n2 = dat$n2[i], rscale = sqrt(2) / 2)
+#    }, error = function(e) {
+#      NA  # assign NA if any error occurs during the calculation
+#    })
+#  }
+  
+  # update the progress bar
+#  setTxtProgressBar(pb, i)
+#}
+
+# close the progress bar
+#close(pb)
+
+# convert it into a data frame
+#res <- do.call(rbind.data.frame, res)
+
+# bind
+#dat <- cbind(dat, res)
+
+#saveRDS(dat, here("Dat","dat0.707.rds"))
+dat <- readRDS(here("Dat","dat0.707.rds"))
+knitr::kable(dfround(dat,3) %>% head(10), "pipe")
+```
+
+
+# Inter-rater agreement test
+
+Calculate kappa coefficient to quantif the inter-rator agreement between classical (P values) and Bayesian (Bayes factors) hypothesis testing methods.
+
+Data wrangling and baisc summary:
+
+```{r}
+# remove NA and inf
+dat <- dat[!is.na(dat$bf) & is.finite(dat$bf), ]
+# add effective sample size 
+dat <- dat %>% mutate(n = 4 * n1 * n2 / (n1 + n2))
+# calculate posterior probability
+dat <- dat %>% mutate(bf_post = bf / (1 + bf))
+
+# add evidence label
+dat <- dat %>% mutate(p_evi = case_when(p <= 0.05 ~ "True",
+                                         p > 0.05 ~ "Null"),
+                       bf_evi = case_when(bf >= 3 ~ "True",
+                                          bf < 3 ~ "Null"))
+
+# evidence category - presence of effect
+table(dat$p_evi) # count(dat,bf_stren)
+which(dat$p_evi == "True") %>% length() # 9347
+which(dat$p_evi == "Null") %>% length() # 12036
+
+which(dat$bf_evi == "True") %>% length() # 7970
+which(dat$bf_evi == "Null") %>% length() # 13413
+```
+
+Write a function to get bootstrapping Cohen's Kappa and its 95% (percentile-based) confidence intervals.
+
+Inter-rater agreement of evidence:
+
+```{r}
+# a function to calculate kappa from resampled data
+kappa_stat <- function(data, indices) {
+  # resample the data
+  resampled_data <- data[indices, ]
+  
+  # calculate kappa statistic
+  kappa_result <- kappa2(resampled_data, "unweighted")
+  
+  return(kappa_result$value)
+}
+
+# bootstrapping
+set.seed(2024)  # for reproducibility
+## run the following function, which will take a long while; alternatively load the pre-saved object
+##kappa_evi <- boot(data = dat[, c("p_evi", "bf_evi")], statistic = kappa_stat, R = 25000)
+#saveRDS(kappa_evi, here("Dat","kappa_evi_rscale0.7.rds"))
+kappa_evi <- readRDS(here("Dat","kappa_evi_rscale0.7.rds")) 
+
+# check results
+boot.ci(kappa_evi, type = "perc")
+```
+
+
+Inter-rater agreement of strength:
+
+```{r}
+# add strength label
+dat <- dat %>% 
+  mutate(p_stren = case_when(
+    p > 0.05 ~ "No or weak",
+    p > 0.01 & p <= 0.05 ~ "Moderate or modest",
+    p <= 0.01 ~ "Strong or very strong"
+  ),
+  bf_stren = case_when(
+    bf < 3 ~ "No or weak",
+    bf >= 3 & bf <= 10 ~ "Moderate or modest",
+    bf > 10 ~ "Strong or very strong"
+  ))
+# bootstrapping
+## run the following function; alternatively load the pre-saved object
+## kappa_stren <- boot(data = dat[, c("p_stren", "bf_stren")],  statistic = kappa_stat, R = 25000)
+#saveRDS(kappa_stren, here("Dat","kappa_stren_rscale0.7.rds"))
+kappa_stren <- readRDS(here("Dat","kappa_stren_rscale0.7.rds")) 
+
+# results
+boot.ci(kappa_stren, type = "perc")
+```
+
+# Correlation 
+
+Correlation tests between different statistical evidence metrics.
+
+```{r}
+# coefficient
+cor.test(dat$p, (1 - dat$bf_post), method = "pearson")
+calculateXI(dat$p, (1 - dat$bf_post))
+
+
+d <- filter(dat,  bf_stren == "No or weak")
+cor.test(d$p, (1 - d$bf_post), method = "pearson")
+calculateXI(d$p, (1 - d$bf_post))
+
+
+d <- filter(dat,  bf_stren == "Moderate or modest")
+cor.test(d$p, (1 - d$bf_post), method = "pearson")
+calculateXI(d$p, (1 - d$bf_post))
+
+d <- filter(dat,  bf_stren == "Strong or very strong")
+cor.test(d$p, (1 - d$bf_post), method = "pearson")
+calculateXI(d$p, (1 - d$bf_post))
+```
+
+
+# Figure
+
+The figures we reported in the main text.
+
+## Figure 2
+
+Visualize the inter-rater agreement of statistical evidence:
+
+```{r, warning=FALSE}
+# add evidence label
+dat2 <- dat %>% mutate(p_evi = case_when(p <= 0.05 ~ "Presence of evidence for new effects",
+                                         p > 0.05 ~ "Unclear evidence"),
+                       bf_evi = case_when(bf >= 3 ~ "Presence of evidence for new effects",
+                                          1/3 <= bf & bf < 3 ~ "Undecided evidence",
+                                          bf < 1/3 ~ "Evidence of absence"))
+
+# reformat
+#tabyl(dat_fig,Frequentist, Bayesian)
+dat_fig <- data.frame(evi = dat2$p_evi,
+                      evi2 = dat2$bf_evi) %>%
+  mutate(Frequentist = case_when(evi == "Presence of evidence for new effects" ~ "Presence of evidence for new effects \n (N = 9,347)",
+                                 evi == "Unclear evidence" ~ "Unclear evidence \n (N = 12,036)"),
+         Bayesian = case_when(evi2 == "Presence of evidence for new effects" ~ "Presence of evidence for new effects \n (N = 7,970)",
+                              evi2 == "Evidence of absence" ~ "Evidence of absence \n (N = 417)",
+                              evi2 == "Undecided evidence" ~ "Undecided evidence \n (N = 12,996)"))
+  
+datlong_fig <- dlong(dat_fig, Frequentist, Bayesian)
+datlong_fig$node <- as.factor(datlong_fig$node)
+datlong_fig$node <- factor(datlong_fig$node, levels = c("Presence of evidence for new effects \n (N = 9,347)", "Presence of evidence for new effects \n (N = 7,970)", "Undecided evidence \n (N = 12,996)", "Unclear evidence \n (N = 12,036)", "Evidence of absence \n (N = 417)")) 
+
+# plot
+evidence.p <- ggplot(datlong_fig, aes(x = x, next_x = next_x, node = node, next_node = next_node, fill = factor(node), label = node)) +
+  sankey_p(flow.alpha = 0.8, node.color = "transparent") +  
+  sankey_p_label(size = 3, color = "white", fill = "gray10", alpha = 0.6) + 
+  #scale_fill_manual(values = wes_palette("Cavalcanti1", n = 5)) +
+  scale_fill_lancet() +
+  theme_sankey(base_size = 10) +
+  labs(x = NULL, title = "Hypothesis testing for claiming new discoveries") +
+  theme(legend.position = "none",
+        plot.title = element_text(color = "black", size = 14, hjust = .5),
+        axis.text.x = element_text(color = "black", size = 11)) +
+  scale_x_discrete(labels = c("Classic metric\n (P value)", "Bayesian metric \n (Bayes factor)"), position = "top")
+evidence.p
+```
+
+
+Visualize the inter-rater agreement of strength:
+
+```{r, warning=FALSE}
+# add strength label
+dat2 <- dat %>% 
+  mutate(p_stren = case_when(
+    p > 0.05 ~ "No or weak",
+    p > 0.01 & p <= 0.05 ~ "Moderate or modest",
+    p <= 0.01 ~ "Strong or very strong"
+  ),
+  bf_stren = case_when(
+    bf < 3 ~ "No or weak",
+    bf >= 3 & bf <= 10 ~ "Moderate or modest",
+    bf > 10 ~ "Strong or very strong"
+  ))
+
+dat_fig <- data.frame(stren = dat2$p_stren,
+                      stren2 = dat2$bf_stren) %>% 
+  mutate(Frequentist = case_when(stren == "No or weak" ~ "No or weak \n (N = 12,036)",
+                                 stren == "Moderate or modest" ~ "Moderate or modest \n (N = 2,490)",
+                                 stren == "Strong or very strong" ~ "Strong or very strong \n (N = 6,857)"),
+         Bayesian = case_when(stren2 == "No or weak" ~ "No or weak \n (N = 13,413)",
+                                 stren2 == "Moderate or modest" ~ "Moderate or modest \n (N = 2,253)",
+                                 stren2 == "Strong or very strong" ~ "Strong or very strong \n (N = 5,717)"))
+
+
+#tabyl(dat_fig,Frequentist, Bayesian)
+datlong_fig <- dlong(dat_fig, Frequentist, Bayesian) 
+datlong_fig$node <- as.factor(datlong_fig$node)
+datlong_fig$node <- factor(datlong_fig$node, levels = c("Strong or very strong \n (N = 5,717)", "Strong or very strong \n (N = 6,857)", "Moderate or modest \n (N = 2,253)", "Moderate or modest \n (N = 2,490)", "No or weak \n (N = 12,036)", "No or weak \n (N = 13,413)"))
+
+# plot
+strength.p <- ggplot(datlong_fig, aes(x = x, next_x = next_x, node = node, next_node = next_node, fill = factor(node), label = node)) +
+  sankey_p(flow.alpha = 0.8, node.color = "transparent") +  
+  sankey_p_label(size = 3, color = "white", fill = "gray10", alpha = 0.6) + 
+  #scale_fill_manual(values = paletteer_d("nationalparkcolors::Acadia", n = 6)) + 
+  scale_fill_npg() + 
+  theme_sankey(base_size = 10) +
+  labs(x = NULL, title = "Strength of evidence for claiming new discoveries") +
+  theme(legend.position = "none",
+        plot.title = element_text(color = "black", size = 14, hjust = .5),
+        axis.text.x = element_text(color = "black", size = 11)) +
+  scale_x_discrete(labels = c("Classic metric \n (P value)", "Bayesian metric \n (Bayes factor)"), position = "top")
+
+
+
+# save
+#png(filename = "./Fig/fig 1.png", width = 5, height = 8, units = "in", type = "windows", res = 600)
+#evidence.p + strength.p + plot_layout(nrow = 2, ncol = 1 , tag_level = 'new') +
+#  plot_annotation(tag_levels = list(c('A', "B"))) & theme(plot.tag = element_text(size = 12, face = "bold"))
+#dev.off()
+strength.p
+```
+
+
+## Figure 4
+
+Visualize the correlation between different metrics:
+
+```{r, warning=FALSE}
+# add es interpretation
+dat3 <- dat2 %>% 
+  mutate(es_stren = case_when(
+    abs(d) <= 0.2 ~ "Small effect",
+    0.2 < abs(d) & abs(d) <= 0.5 ~ "Small to medium",
+    0.5 < abs(d) & abs(d) <= 0.8 ~ "Medium to large",
+    abs(d) > 0.2 ~ "Large effect"
+  ))
+dat3$es_stren <- as.factor(dat3$es_stren)
+dat3$es_stren <- factor(dat3$es_stren, levels = c("Small effect", "Small to medium", "Medium to large", "Large effect"))
+
+# overall
+p1 <- filter(dat3, n < 500) %>%
+  ggplot() + 
+  geom_point(aes(x = p, y = 1 - bf_post, size = n, color = es_stren)) +
+  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, by = 0.25), labels = scales::percent_format(accuracy=1)) +
+  scale_x_continuous(limits = c(0,1), breaks = seq(0, 1, by = 0.25), expand = expansion(mult = c(0.015, 0.025))) +
+  scale_color_nejm() +
+  theme_bw() + 
+  labs(x = "P value", y = "Posterior probability of the null", size = "Effective sample size", color = "Effect size magnitude", title = "Overall") + 
+  theme(axis.text = element_text(color = "black", size = 14),
+        axis.title = element_text(color = "black", size = 16),
+        plot.title = element_text(color = "black", size = 16),
+        legend.position = c(1, 0), legend.justification = c(1, 0),
+        legend.background = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)),
+        legend.key = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)))
+
+# No or weak evidence
+p2 <- filter(dat3, bf_stren == "No or weak" & n < 500) %>%
+  ggplot() + 
+  geom_point(aes(x = p, y = 1 - bf_post, size = n, color = es_stren)) +
+  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, by = 0.25), labels = scales::percent_format(accuracy=1)) +
+  scale_x_continuous(limits = c(0,1), breaks = seq(0, 1, by = 0.25), expand = expansion(mult = c(0.015, 0.025))) +
+  scale_color_nejm() +
+  theme_bw() + 
+  labs(x = "P value", y = "Posterior probability of the null", size = "Effective sample size", color = "Effect size magnitude", title = "No or weak evidence") +
+  theme(axis.text = element_text(color = "black", size = 14),
+        axis.title = element_text(color = "black", size = 16),
+        plot.title = element_text(color = "black", size = 16),
+        legend.position = c(1, 0), legend.justification = c(1, 0),
+        legend.background = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)),
+        legend.key = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)))
+
+# Moderate or modest effect
+p3 <- filter(dat3, bf_stren == "Moderate or modest" & n < 500) %>%
+  ggplot() + 
+  geom_point(aes(x = p, y = 1 - bf_post, size = n, color = es_stren)) +
+  scale_y_continuous(limits = c(0,0.3), breaks = seq(0, 0.3, by = 0.1), labels = scales::percent_format(accuracy=1)) +
+  scale_x_continuous(limits = c(0,0.032), breaks = seq(0, 0.03, by = 0.01), expand = expansion(mult = c(0.015, 0.025))) +
+  scale_color_nejm() +
+  theme_bw() + 
+  labs(x = "P value", y = "Posterior probability of the null", size = "Effective sample size", color = "Effect size magnitude", title = "Moderate or modest evidence") +
+  theme(axis.text = element_text(color = "black", size = 14),
+        axis.title = element_text(color = "black", size = 16),
+        plot.title = element_text(color = "black", size = 16),
+        legend.position = c(1, 0), legend.justification = c(1, 0),
+        legend.background = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)),
+        legend.key = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)))
+
+
+
+p4 <- filter(dat3, bf_stren == "Strong or very strong" & n < 500) %>%
+  ggplot() + 
+  geom_point(aes(x = p, y = 1 - bf_post, size = n, color = es_stren)) +
+  scale_y_continuous(limits = c(0,0.1), breaks = seq(0, 0.1, by = 0.025), labels = scales::percent_format(accuracy=1)) +
+  scale_x_continuous(limits = c(0,0.0051), breaks = seq(0, 0.005, by = 0.001), expand = expansion(mult = c(0.015, 0.025))) +
+  scale_color_nejm() +
+  theme_bw() + 
+  labs(x = "P value", y = "Posterior probability of the null", size = "Effective sample size", color = "Effect size magnitude", title = "Strong or very strong evidence") +
+  theme(axis.text = element_text(color = "black", size = 14),
+        axis.title = element_text(color = "black", size = 16),
+        plot.title = element_text(color = "black", size = 16),
+        legend.position = c(1, 0), legend.justification = c(1, 0),
+        legend.background = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)),
+        legend.key = element_rect(colour = alpha("white", 0.0), fill = alpha("white", 0.0)))
+
+
+# save
+#png(filename = "./fig 2.png", width = 11, height = 11, units = "in", type = "windows", res = 600)
+#p1 + p2 + p3 + p4 + plot_layout(nrow = 2, ncol = 2 , tag_level = 'new') +
+#  plot_annotation(tag_levels = list(c('A', "B", "C", "D"))) & theme(plot.tag = element_text(size = 14, face = "bold"))
+#dev.off()
+p1
+p2
+p3
+p4
+```
+
+
+# Package information
+
+```{r}
+subset(data.frame(sessioninfo::package_info()), attached==TRUE, c(package, loadedversion))
+```
+
